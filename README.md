@@ -2,7 +2,7 @@
 
 An Android app for running machine-learning workloads on the **TPU (NPU) inside the Google Tensor chip** of a Pixel 11, and measuring what that hardware can actually do compared with the CPU and GPU.
 
-> **Status:** early planning. This README describes the goal and the intended design; no app code exists yet.
+> **Status:** first working piece. The app runs a [Koog](https://github.com/JetBrains/koog) agent backed by **Gemma 4 E2B** on-device, preferring the Tensor TPU. Everything under *Planned features* is still to come.
 
 ## Why
 
@@ -20,10 +20,69 @@ There is no raw "TPU SDK" for Pixel. Access goes through Google's ML runtimes, e
 |------|-------------------|-------|
 | **LiteRT** (formerly TensorFlow Lite), `CompiledModel` API with the NPU accelerator | Run your own `.tflite` models, with NPU → GPU → CPU fallback | Main path for custom models. The model may need ahead-of-time compilation for the target SoC, and not every op is supported on the NPU. |
 | **ML Kit GenAI APIs / AICore (Gemini Nano)** | Summarize, proofread, rewrite, describe images, free-form prompts | Runs on the TPU through AICore. You can't bring your own model. Availability depends on device and AICore version. |
-| **LiteRT-LM / MediaPipe LLM Inference** | Run open small LLMs (e.g. Gemma) on device | Usually GPU- or CPU-backed. NPU support varies by release. |
+| **LiteRT-LM** | Run open small LLMs (e.g. Gemma 4) on device | NPU needs a model compiled for the specific SoC (e.g. `gemma-4-E2B-it_Google_Tensor_G6.litertlm`) plus a vendor dispatch library. Used by the Gemma 4 agent below. |
 | ~~NNAPI~~ | — | Deprecated since Android 15. Don't build new code on it. |
 
 What is supported changes between LiteRT and AICore releases, so the app detects capabilities at runtime instead of assuming them. Check the latest LiteRT and ML Kit docs for Tensor NPU support before relying on any path.
+
+## Gemma 4 agent (Koog + LiteRT-LM)
+
+The app's first screen is a Koog agent running Gemma 4 E2B entirely on the phone. It has read-only tools for the phone's own state, so you can ask things like *"Is my phone running hot right now?"* or *"How much RAM is free?"*:
+
+| Tool | Returns |
+|------|---------|
+| `getDeviceInfo` | Phone model, SoC, Android version |
+| `getBatteryStatus` | Charge %, charging state, battery temperature |
+| `getThermalStatus` | Thermal throttling status and headroom |
+| `getMemoryInfo` | Total and available RAM |
+| `getCurrentDateTime` | Local date, time, time zone |
+
+On start the app picks the fastest backend that loads, then shows which one it's using and why it skipped the others:
+
+1. **NPU (Tensor TPU):** needs all three of these:
+   - a Gemma 4 build for this SoC (Tensor G5 or G6)
+   - `libLiteRtDispatch_GoogleTensor.so` bundled in the APK
+   - the matching model file on the device
+2. **GPU:** needs the generic `gemma-4-E2B-it.litertlm`.
+3. **CPU:** uses the same generic file.
+
+Each prompt runs as a separate agent task. The loaded model stays in memory between prompts, but the conversation doesn't carry over.
+
+### Code layout
+
+```
+app/src/main/kotlin/com/vermasrijan/pixelnpu/
+  agent/OnDeviceGemmaAgent.kt   Backend selection (NPU → GPU → CPU) and the Koog agent
+  agent/DeviceTools.kt          Koog @Tool functions
+  agent/litert/                 Koog's LiteRT LLM client, vendored (see below) + Gemma 4 model catalog
+  ui/                           Compose screen + ViewModel
+scripts/push-model.sh           adb-push .litertlm files to /data/local/tmp/llm
+scripts/build-tensor-dispatch.sh  Build the Tensor NPU dispatch library from LiteRT source
+```
+
+**Why the LiteRT client is vendored:** Koog 1.3.0 ships a `LiteRTLLMClient`, but it's compiled against LiteRT-LM 0.11.0. The Tensor G6 build of Gemma 4 was validated on LiteRT-LM 0.17.0, and Koog's compiled client throws `NoSuchMethodError` there because `ConversationConfig` gained parameters. So `agent/litert/` is Koog's client source (Apache-2.0) recompiled against 0.17.0, plus a `warmUp()` hook that loads the model early so a failing backend can fall back before the first prompt.
+
+### Running it
+
+1. **Download a model** from [litert-community/gemma-4-E2B-it-litert-lm](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm). For the TPU get `gemma-4-E2B-it_Google_Tensor_G6.litertlm` (~3.3 GB). For GPU/CPU, or as a fallback, get `gemma-4-E2B-it.litertlm`.
+   ```bash
+   hf download litert-community/gemma-4-E2B-it-litert-lm gemma-4-E2B-it_Google_Tensor_G6.litertlm --local-dir models
+   ```
+2. **Push it to the phone:**
+   ```bash
+   scripts/push-model.sh models/gemma-4-E2B-it_Google_Tensor_G6.litertlm
+   ```
+3. **(For the TPU) build the Tensor dispatch library.** Google doesn't publish it prebuilt for current LiteRT, so this builds it with Bazel from the LiteRT commit that LiteRT-LM 0.17.0 pins, and places it in `app/src/main/jniLibs/arm64-v8a/`:
+   ```bash
+   ANDROID_NDK_HOME=/path/to/ndk scripts/build-tensor-dispatch.sh
+   ```
+   Without it, the app skips the NPU and runs on the GPU.
+4. **Build and install:**
+   ```bash
+   ./gradlew :app:installDebug
+   ```
+
+The app also looks for models in its private `files/models/` directory. Use that if the NPU backend can't read a model from `/data/local/tmp/llm`. On a debug build you can copy one there with `adb shell run-as com.vermasrijan.pixelnpu`.
 
 ## Planned features
 
@@ -39,6 +98,8 @@ What is supported changes between LiteRT and AICore releases, so the app detects
 - **Exportable results:** save runs as JSON/CSV to compare across builds, OS updates, and devices.
 
 ## Planned architecture
+
+This is the target layout. Today only the agent, the LiteRT client and the UI exist.
 
 ```
 app/                    Jetpack Compose UI (dashboard, benchmark runner, demos)
@@ -68,8 +129,9 @@ val scores = outputs[0].readFloat()
 ## Tech stack
 
 - **Language/UI:** Kotlin, Jetpack Compose, coroutines
-- **Build:** Gradle (Kotlin DSL), Android Gradle Plugin
-- **ML runtimes:** LiteRT, ML Kit GenAI APIs, LiteRT-LM / MediaPipe (optional)
+- **Build:** Gradle 9.4 (Kotlin DSL), Android Gradle Plugin 9.2, compile/target SDK 37, min SDK 31, arm64 only
+- **Agents:** Koog 1.3.0
+- **ML runtimes:** LiteRT-LM 0.17.0 (Gemma 4); later LiteRT and ML Kit GenAI APIs
 - **Profiling:** Perfetto (CPU/GPU/power rails), Android Studio Profiler
 - **Min SDK:** chosen to match the LiteRT NPU and AICore requirements; target is the Pixel 11's shipping Android version
 
@@ -82,17 +144,13 @@ val scores = outputs[0].readFloat()
 
 ## Getting started
 
-_Build instructions will be added once the Gradle project exists._ The planned flow:
-
-```bash
-git clone https://github.com/vermasrijan19/AI-tools.git
-cd AI-tools
-./gradlew :app:installDebug      # build and install on a connected Pixel
-```
+See [Running it](#running-it) above.
 
 ## Roadmap
 
-- [ ] Gradle project skeleton + Compose app shell
+- [x] Gradle project skeleton + Compose app shell
+- [x] Koog agent on Gemma 4 (LiteRT-LM) with NPU → GPU → CPU fallback and device tools
+- [ ] Multi-turn chat memory for the agent
 - [ ] Device/accelerator capability report screen
 - [ ] LiteRT integration with CPU/GPU/NPU selection
 - [ ] Benchmark harness (warm-up, repeated runs, percentile stats, thermal tracking)
@@ -116,3 +174,6 @@ cd AI-tools
 - Gemini Nano on Android: <https://developer.android.com/ai/gemini-nano>
 - Google AI Edge: <https://ai.google.dev/edge>
 - Perfetto: <https://perfetto.dev>
+- Koog: <https://github.com/JetBrains/koog>
+- LiteRT-LM: <https://github.com/google-ai-edge/LiteRT-LM>
+- Gemma 4 E2B LiteRT-LM builds: <https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm>
