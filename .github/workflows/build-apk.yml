@@ -17,7 +17,11 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      # Accepts SDK licenses so AGP can download the platform it needs. The action's default
+      # package list includes the removed 'tools' package, so name only what exists.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v4
 
