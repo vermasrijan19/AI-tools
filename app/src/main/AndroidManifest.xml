@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Only used to download model files; inference runs offline. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Apps targeting SDK 37 must declare NPU use or the Tensor driver rejects direct NPU execution. -->
     <uses-feature
         android:name="android.hardware.npu"

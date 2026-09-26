@@ -4,7 +4,10 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vermasrijan.pixelnpu.agent.Accelerator
+import com.vermasrijan.pixelnpu.agent.ModelDownloader
 import com.vermasrijan.pixelnpu.agent.OnDeviceGemmaAgent
+import com.vermasrijan.pixelnpu.agent.litert.ModelDownload
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,7 +21,14 @@ import kotlin.time.measureTimedValue
 sealed interface LoadState {
     data class Loading(val trying: Accelerator?) : LoadState
     data class Ready(val agent: OnDeviceGemmaAgent) : LoadState
-    data class Failed(val message: String) : LoadState
+
+    /** @property offer A model file the user can download to fix this, if one is missing. */
+    data class Failed(val message: String, val offer: ModelDownload?) : LoadState
+}
+
+sealed interface DownloadState {
+    data class Running(val downloadedBytes: Long, val totalBytes: Long) : DownloadState
+    data class Failed(val message: String) : DownloadState
 }
 
 sealed interface TranscriptEntry {
@@ -30,6 +40,7 @@ sealed interface TranscriptEntry {
 
 data class AgentUiState(
     val load: LoadState = LoadState.Loading(trying = null),
+    val download: DownloadState? = null,
     val transcript: List<TranscriptEntry> = emptyList(),
     val running: Boolean = false,
 )
@@ -39,11 +50,18 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<AgentUiState> = _state.asStateFlow()
 
     private var agent: OnDeviceGemmaAgent? = null
+    private var downloadJob: Job? = null
 
     init {
+        load()
+    }
+
+    private fun load() {
+        _state.update { it.copy(load = LoadState.Loading(trying = null)) }
         viewModelScope.launch {
+            val app = getApplication<Application>()
             val load = try {
-                val loaded = OnDeviceGemmaAgent.load(application) { accelerator ->
+                val loaded = OnDeviceGemmaAgent.load(app) { accelerator ->
                     _state.update { it.copy(load = LoadState.Loading(trying = accelerator)) }
                 }
                 agent = loaded
@@ -51,10 +69,37 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                LoadState.Failed(e.message ?: e.toString())
+                LoadState.Failed(e.message ?: e.toString(), OnDeviceGemmaAgent.modelToDownload(app))
             }
             _state.update { it.copy(load = load) }
         }
+    }
+
+    /** Downloads the offered model into app storage, then loads the agent. */
+    fun download(hfToken: String) {
+        val offer = (_state.value.load as? LoadState.Failed)?.offer ?: return
+        if (downloadJob?.isActive == true) return
+        _state.update { it.copy(download = DownloadState.Running(0, offer.sizeBytes)) }
+        downloadJob = viewModelScope.launch {
+            try {
+                val dir = OnDeviceGemmaAgent.downloadDir(getApplication())
+                ModelDownloader.download(offer, dir, hfToken) { done, total ->
+                    _state.update { it.copy(download = DownloadState.Running(done, total)) }
+                }
+                _state.update { it.copy(download = null) }
+                load()
+            } catch (e: CancellationException) {
+                _state.update { it.copy(download = null) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(download = DownloadState.Failed(e.message ?: e.toString())) }
+            }
+        }
+    }
+
+    /** Stops the download; the partial file is kept so the next attempt resumes. */
+    fun cancelDownload() {
+        downloadJob?.cancel()
     }
 
     fun run(input: String) {

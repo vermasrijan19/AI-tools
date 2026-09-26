@@ -64,25 +64,25 @@ scripts/build-tensor-dispatch.sh  Build the Tensor NPU dispatch library from Lit
 
 ### Running it
 
-1. **Download a model** from [litert-community/gemma-4-E2B-it-litert-lm](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm). For the TPU get `gemma-4-E2B-it_Google_Tensor_G6.litertlm` (~3.3 GB). For GPU/CPU, or as a fallback, get `gemma-4-E2B-it.litertlm`.
-   ```bash
-   hf download litert-community/gemma-4-E2B-it-litert-lm gemma-4-E2B-it_Google_Tensor_G6.litertlm --local-dir models
-   ```
-2. **Push it to the phone:**
-   ```bash
-   scripts/push-model.sh models/gemma-4-E2B-it_Google_Tensor_G6.litertlm
-   ```
-3. **(For the TPU) build the Tensor dispatch library.** Google doesn't publish it prebuilt for current LiteRT, so this builds it with Bazel from the LiteRT commit that LiteRT-LM 0.17.0 pins, and places it in `app/src/main/jniLibs/arm64-v8a/`:
+1. **Get a model onto the phone**, using either option:
+   - **In the app:** if no model is found, the app offers to download one into its own storage. That's the Tensor NPU build when the APK bundles the dispatch library, otherwise `gemma-4-E2B-it.litertlm` (2.6 GB). The [Hugging Face repo](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm) is gated, so first accept the license there, then paste a read token from <https://huggingface.co/settings/tokens>. Keep the app open while it downloads. If you pause or lose the connection, it resumes where it left off.
+   - **From a computer:** download the file and push it with adb:
+     ```bash
+     hf download litert-community/gemma-4-E2B-it-litert-lm gemma-4-E2B-it.litertlm --local-dir models
+     scripts/push-model.sh models/gemma-4-E2B-it.litertlm
+     ```
+   For the TPU you need `gemma-4-E2B-it_Google_Tensor_G6.litertlm` (3.3 GB) instead.
+2. **(For the TPU) build the Tensor dispatch library.** Google doesn't publish it prebuilt for current LiteRT, so this builds it with Bazel from the LiteRT commit that LiteRT-LM 0.17.0 pins, and places it in `app/src/main/jniLibs/arm64-v8a/`:
    ```bash
    ANDROID_NDK_HOME=/path/to/ndk scripts/build-tensor-dispatch.sh
    ```
    Without it, the app skips the NPU and runs on the GPU.
-4. **Build and install:**
+3. **Build and install.** Every push also builds a debug APK in GitHub Actions (the *Build APK* workflow's artifact).
    ```bash
    ./gradlew :app:installDebug
    ```
 
-The app also looks for models in its private `files/models/` directory. Use that if the NPU backend can't read a model from `/data/local/tmp/llm`. On a debug build you can copy one there with `adb shell run-as com.vermasrijan.pixelnpu`.
+The app looks for models in its private `files/models/` directory first (in-app downloads go there), then in `/data/local/tmp/llm`.
 
 ## Planned features
 

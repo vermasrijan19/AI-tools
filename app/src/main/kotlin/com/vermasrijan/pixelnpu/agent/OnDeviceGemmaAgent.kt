@@ -12,6 +12,7 @@ import com.vermasrijan.pixelnpu.agent.litert.Gemma4Models
 import com.vermasrijan.pixelnpu.agent.litert.LiteRTClientConfig
 import com.vermasrijan.pixelnpu.agent.litert.LiteRTLLMClient
 import com.vermasrijan.pixelnpu.agent.litert.LiteRTLLMProvider
+import com.vermasrijan.pixelnpu.agent.litert.ModelDownload
 import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration
@@ -73,6 +74,26 @@ class OnDeviceGemmaAgent private constructor(
         /** Vendor dispatch library LiteRT needs to reach the Tensor TPU; see scripts/build-tensor-dispatch.sh. */
         const val TENSOR_DISPATCH_LIBRARY = "libLiteRtDispatch_GoogleTensor.so"
 
+        /** Where in-app downloads go; searched before [ADB_MODELS_DIR]. */
+        fun downloadDir(context: Context): File = File(context.filesDir, "models")
+
+        /**
+         * The model file worth downloading when nothing loads: the Tensor NPU build if this
+         * APK can use the TPU, otherwise the generic GPU/CPU build. `null` if it is already present.
+         */
+        fun modelToDownload(context: Context): ModelDownload? {
+            val npuModel = Gemma4Models.forTensorNpu(Build.SOC_MODEL)
+                ?.takeIf { hasTensorDispatch(context) }
+            val model = npuModel ?: Gemma4Models.E2B
+            val present = modelDirs(context).any { File(it, model.id).isFile }
+            return if (present) null else Gemma4Models.downloadFor(model)
+        }
+
+        private fun modelDirs(context: Context) = listOf(downloadDir(context), File(ADB_MODELS_DIR))
+
+        private fun hasTensorDispatch(context: Context) =
+            File(context.applicationInfo.nativeLibraryDir, TENSOR_DISPATCH_LIBRARY).isFile
+
         private val SYSTEM_PROMPT = """
             You are an assistant running entirely on this Android phone, on-device, with no internet access.
             Use the tools to look up facts about the phone (hardware, battery, temperature, memory, time)
@@ -87,7 +108,7 @@ class OnDeviceGemmaAgent private constructor(
          */
         suspend fun load(context: Context, onAttempt: (Accelerator) -> Unit = {}): OnDeviceGemmaAgent {
             val nativeLibraryDir = context.applicationInfo.nativeLibraryDir
-            val modelDirs = listOf(File(context.filesDir, "models"), File(ADB_MODELS_DIR))
+            val modelDirs = modelDirs(context)
             val cacheDir = File(context.cacheDir, "litertlm").apply { mkdirs() }.path
             val toolRegistry = ToolRegistry { tools(DeviceTools(context).asTools()) }
             val rejected = mutableListOf<AcceleratorRejection>()
@@ -97,7 +118,7 @@ class OnDeviceGemmaAgent private constructor(
                 when {
                     npuModel == null ->
                         rejected += AcceleratorRejection(Accelerator.NPU, "no Gemma 4 NPU build for SoC '${Build.SOC_MODEL}'")
-                    !File(nativeLibraryDir, TENSOR_DISPATCH_LIBRARY).isFile ->
+                    !hasTensorDispatch(context) ->
                         rejected += AcceleratorRejection(Accelerator.NPU, "$TENSOR_DISPATCH_LIBRARY is not bundled in the APK")
                     else -> add(Triple(Accelerator.NPU, npuModel, Backend.NPU(nativeLibraryDir)))
                 }
