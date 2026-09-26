@@ -22,16 +22,16 @@ object ModelDownloader {
      * Downloads [download] into [dir] and returns the finished file.
      *
      * @param hfToken Hugging Face access token, sent as a bearer token; the Gemma 4 repo is gated.
-     * @param onProgress Called with (bytes downloaded, total bytes), at most every 250 ms.
      * @param url Source URL; defaults to the model's Hugging Face URL.
+     * @param onProgress Called with (bytes downloaded, total bytes), at most every 250 ms.
      * @throws IOException on network or storage errors, including a missing or rejected token.
      */
     suspend fun download(
         download: ModelDownload,
         dir: File,
         hfToken: String?,
-        onProgress: (Long, Long) -> Unit,
         url: String = download.url,
+        onProgress: (Long, Long) -> Unit,
     ): File = withContext(Dispatchers.IO) {
         dir.mkdirs()
         val target = File(dir, download.fileName)
